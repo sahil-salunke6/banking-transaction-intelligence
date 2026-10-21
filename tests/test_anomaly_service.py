@@ -3,7 +3,7 @@ import pandas as pd
 
 from app.services.anomaly_service import build_features
 from app.services import anomaly_service
-
+from pathlib import Path
 
 #------------------------------------------
 #   Tests for feature transformation
@@ -184,22 +184,68 @@ def test_anomaly_service_handles_empty_database(
     assert result["error"] == "No transactions available"
 
 
-def test_anomaly_service_returns_assessment(
-    monkeypatch,
-):
+
+def test_anomaly_service_returns_assessment(monkeypatch):
+    import numpy as np
+
     records = make_transactions(count=10)
 
     # Include an unusually large transaction.
     records[9]["amount"] = 500000
     records[9]["country"] = "United States"
-    records[9]["transaction_time"] = (
-        "2026-10-14T02:00:00"
-    )
+    records[9]["transaction_time"] = "2026-10-14T02:00:00"
+
+    class FakeModel:
+        def predict(self, features):
+            return np.array([-1])
+
+        def decision_function(self, features):
+            return np.array([-0.75])
+
+    fake_artifact = {
+        "model": FakeModel(),
+        "feature_columns": [
+            "amount",
+            "transaction_hour",
+            "is_foreign",
+            "is_failed",
+        ],
+        "model_name": "IsolationForest",
+        "model_version": "test-version",
+        "trained_at": "2026-10-14T00:00:00",
+        "training_rows": 10,
+        "n_estimators": 100,
+        "contamination": 0.1,
+    }
 
     monkeypatch.setattr(
         anomaly_service,
         "get_all",
         lambda: records,
+    )
+    
+    fake_model_path = Path("fake-model.joblib")
+    monkeypatch.setattr(
+        anomaly_service,
+        "MODEL_PATH",
+        fake_model_path,
+    )
+
+    original_exists = Path.exists
+
+    monkeypatch.setattr(
+        anomaly_service.Path,
+        "exists",
+        lambda self: (
+            True
+            if self == fake_model_path
+            else original_exists(self)
+        ),
+    )
+    monkeypatch.setattr(
+        anomaly_service,
+        "get_model_artifact",
+        lambda: fake_artifact,
     )
 
     result = anomaly_service.detect_transaction_anomaly(
@@ -207,10 +253,7 @@ def test_anomaly_service_returns_assessment(
     )
 
     assert result["transaction_id"] == "TXN_ML_10"
-    assert result["anomaly_status"] in {
-        "ANOMALY",
-        "NORMAL",
-    }
+    assert result["anomaly_status"] == "ANOMALY"
     assert isinstance(result["anomaly_score"], float)
     assert result["model"] == "IsolationForest"
     assert set(result["features"]) == {
@@ -219,3 +262,4 @@ def test_anomaly_service_returns_assessment(
         "is_foreign",
         "is_failed",
     }
+
